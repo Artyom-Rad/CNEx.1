@@ -1,0 +1,141 @@
+"""app.py - Dashboard לניתוח תעבורת רשת (Streamlit). הרצה: streamlit run app.py"""
+import hashlib
+import os
+import tempfile
+
+import pandas as pd
+import plotly.express as px
+import streamlit as st
+
+from ai_engine import ask_ai, build_context
+from pcap_analyzer import analyze_pcap
+
+st.set_page_config(page_title="PCAP Dashboard", layout="wide")
+st.title("📡 Dashboard לניתוח תעבורת רשת")
+
+
+@st.cache_data(show_spinner="מנתח את ההקלטה...")
+def load(data: bytes, suffix: str, digest: str):
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as f:
+        f.write(data)
+        path = f.name
+    try:
+        return analyze_pcap(path)
+    finally:
+        os.unlink(path)
+
+
+# ------------------------------------------------------------- FR-1: קלט
+up = st.sidebar.file_uploader("העלה קובץ הקלטה", type=["pcap", "pcapng"])
+if not up:
+    st.info("העלה קובץ .pcap או .pcapng בסרגל הצד כדי להתחיל.")
+    st.stop()
+
+raw = up.getvalue()
+try:
+    res = load(raw, os.path.splitext(up.name)[1], hashlib.md5(raw).hexdigest())
+except Exception as e:
+    st.error(f"לא ניתן לנתח את הקובץ: {e}")
+    st.stop()
+
+for w in res.warnings[:10]:
+    st.warning(w)
+if len(res.warnings) > 10:
+    st.warning(f"... ועוד {len(res.warnings) - 10} אזהרות.")
+
+S, pk, tx = res.summary, res.packets, res.transactions
+tab1, tab2, tab3 = st.tabs(["📊 סקירה כללית", "🌐 טרנזקציות HTTP", "🤖 שאל את ה-AI"])
+
+# ------------------------------------------------------------- FR-2..FR-4
+with tab1:
+    c = st.columns(4)
+    c[0].metric("סך חבילות", f"{S['total_packets']:,}")
+    c[1].metric("משך (שניות)", S["duration_sec"])
+    c[2].metric("זמן התחלה", S["start_time"])
+    c[3].metric("זמן סיום", S["end_time"])
+
+    left, right = st.columns(2)
+    with left:
+        st.subheader("Top Talkers")
+        tt = pd.DataFrame(S["top_talkers"], columns=["IP", "Packets"])
+        st.dataframe(tt, use_container_width=True, hide_index=True)
+        fig = px.bar(tt, x="IP", y="Packets", title="Top Talkers")
+        st.plotly_chart(fig, use_container_width=True)
+    with right:
+        st.subheader("התפלגות פרוטוקולים")
+        pr = pd.DataFrame(list(S["protocols"].items()), columns=["Protocol", "Packets"])
+        st.plotly_chart(px.pie(pr, names="Protocol", values="Packets"), use_container_width=True)
+
+    st.subheader("נפח תעבורה על ציר הזמן")
+    width = max(S["duration_sec"] / 60, 0.001)
+    t = pk.assign(bucket=((pk["time"] - S["start_epoch"]) // width) * width)
+    ts_df = t.groupby("bucket", as_index=False)["length"].sum()
+    ts_df.columns = ["Seconds from start", "Bytes"]
+    st.plotly_chart(px.line(ts_df, x="Seconds from start", y="Bytes"), use_container_width=True)
+
+# ------------------------------------------------------------- FR-5..FR-7
+selected_id = None
+with tab2:
+    if tx.empty:
+        st.info("לא זוהו טרנזקציות HTTP בהקלטה (ייתכן שהתעבורה מוצפנת - HTTPS).")
+    else:
+        f1, f2, f3 = st.columns(3)
+        methods = f1.multiselect("Method", sorted(tx["Method"].dropna().unique()))
+        statuses = f2.multiselect("Status", sorted(tx["Status"].dropna().astype(int).unique()))
+        q = f3.text_input("חיפוש ב-Host/URI")
+        view = tx
+        if methods:
+            view = view[view["Method"].isin(methods)]
+        if statuses:
+            view = view[view["Status"].isin(statuses)]
+        if q:
+            m = view["Host"].fillna("").str.contains(q, case=False) | \
+                view["URI"].fillna("").str.contains(q, case=False)
+            view = view[m]
+        st.caption(f"{len(view)} מתוך {len(tx)} טרנזקציות · "
+                   f"{S['unanswered_requests']} בקשות ללא תגובה")
+        st.dataframe(view, use_container_width=True, hide_index=True)
+
+        if len(view):
+            st.subheader("פרטי טרנזקציה")
+            selected_id = st.selectbox(
+                "בחר טרנזקציה", view["ID"].tolist(),
+                format_func=lambda i: "#{} · {} {}{}".format(
+                    i, tx.loc[tx.ID == i, "Method"].iloc[0],
+                    tx.loc[tx.ID == i, "Host"].iloc[0] or "",
+                    tx.loc[tx.ID == i, "URI"].iloc[0] or ""))
+            d = res.tx_details[selected_id]
+            a, b = st.columns(2)
+            with a:
+                st.markdown("**Request**")
+                st.code(d["req_head"], language="http")
+                if d["req_body"]:
+                    st.code(d["req_body"][:4000])
+            with b:
+                st.markdown("**Response**")
+                if d["resp_head"]:
+                    st.code(d["resp_head"], language="http")
+                    if d["resp_body"]:
+                        st.code(d["resp_body"][:4000])
+                else:
+                    st.warning("לא נמצאה תגובה לבקשה זו.")
+
+# ------------------------------------------------------------- FR-8..FR-11
+with tab3:
+    st.caption("ה-AI מקבל רק את הנתונים המובנים שחולצו - לא את קובץ ה-PCAP.")
+    use_sel = st.checkbox("צרף ל-AI את פרטי הטרנזקציה שנבחרה בלשונית HTTP (לשאלות על ה-Stream)",
+                          value=True, disabled=selected_id is None)
+    if "history" not in st.session_state:
+        st.session_state.history = []
+    question = st.text_input("שאל שאלה על התעבורה",
+                             placeholder="מהי הבקשה האיטית ביותר? כמה בקשות נשלחו ל-example.com?")
+    if st.button("שלח", type="primary") and question.strip():
+        sel = res.tx_details.get(selected_id) if (use_sel and selected_id) else None
+        ctx = build_context(S, tx, sel, selected_id)
+        with st.spinner("חושב..."):
+            ans = ask_ai(question, ctx)
+        st.session_state.history.insert(0, (question, ans))
+    for qn, an in st.session_state.history:
+        st.markdown(f"**❓ {qn}**")
+        st.markdown(an)
+        st.divider()
