@@ -139,3 +139,6 @@ with tab3:
         st.markdown(f"**❓ {qn}**")
         st.markdown(an)
         st.divider()
+    key = st.sidebar.text_input("Gemini API Key", type="password")
+if key:
+    os.environ["GEMINI_API_KEY"] = key

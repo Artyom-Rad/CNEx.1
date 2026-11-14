@@ -9,8 +9,12 @@ import json
 import os
 
 import pandas as pd
-
-MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-5-5")
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
 MAX_TX_ROWS = 400
 MAX_DETAIL_CHARS = 6000
 
@@ -64,16 +68,25 @@ def build_context(summary: dict, tx: pd.DataFrame, selected: dict | None = None,
 
 
 def ask_ai(question: str, context: str) -> str:
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        return "⚠️ לא הוגדר משתנה הסביבה ANTHROPIC_API_KEY. ראה הוראות ב-README."
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    if not api_key:
+        return "⚠️ לא הוגדר משתנה הסביבה GEMINI_API_KEY. ראה הוראות ב-README."
     try:
-        import anthropic
-        client = anthropic.Anthropic()
-        resp = client.messages.create(
-            model=MODEL, max_tokens=1500, temperature=0, system=SYSTEM_PROMPT,
-            messages=[{"role": "user",
-                       "content": f"{context}\n\n## QUESTION\n{question}"}],
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(api_key=api_key)
+        resp = client.models.generate_content(
+            model=MODEL,
+            contents=f"{context}\n\n## QUESTION\n{question}",
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+                temperature=0,
+                max_output_tokens=4096,
+            ),
         )
-        return "".join(b.text for b in resp.content if b.type == "text")
+        if resp.text:
+            return resp.text
+        return "⚠️ ה-AI לא החזיר תשובה (ייתכן שנחסם על ידי מסנני הבטיחות). נסה לנסח מחדש."
     except Exception as e:
         return f"⚠️ שגיאה בקריאה ל-AI: {e}"
