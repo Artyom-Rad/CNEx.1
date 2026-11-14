@@ -1,19 +1,20 @@
-"""ai_engine.py - מנוע תשאול AI (FR-8..FR-11).
+"""ai_engine.py - AI query engine (FR-8..FR-11).
 
-ל-AI נשלחים רק נתונים מובנים שחולצו (סיכום + טבלת טרנזקציות + אגרגציות מחושבות),
-אף פעם לא קובץ ה-PCAP הגולמי. מפתח ה-API נקרא ממשתנה סביבה ANTHROPIC_API_KEY.
+Only extracted structured data (summary + transactions table + precomputed aggregates)
+is sent to the AI, never the raw PCAP file. The API key is read from the GEMINI_API_KEY
+environment variable (or GOOGLE_API_KEY). AI provider: Google Gemini.
 """
 from __future__ import annotations
 
 import json
 import os
-
 import pandas as pd
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
     pass
+
 MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
 MAX_TX_ROWS = 400
 MAX_DETAIL_CHARS = 6000
@@ -70,7 +71,7 @@ def build_context(summary: dict, tx: pd.DataFrame, selected: dict | None = None,
 def ask_ai(question: str, context: str) -> str:
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if not api_key:
-        return "⚠️ לא הוגדר משתנה הסביבה GEMINI_API_KEY. ראה הוראות ב-README."
+        return "⚠️ The GEMINI_API_KEY environment variable is not set. See the README for instructions."
     try:
         from google import genai
         from google.genai import types
@@ -82,11 +83,12 @@ def ask_ai(question: str, context: str) -> str:
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_PROMPT,
                 temperature=0,
+                # On 2.5 models, "thinking" tokens count toward the limit, so it is set higher
                 max_output_tokens=4096,
             ),
         )
         if resp.text:
             return resp.text
-        return "⚠️ ה-AI לא החזיר תשובה (ייתכן שנחסם על ידי מסנני הבטיחות). נסה לנסח מחדש."
+        return "⚠️ The AI returned no answer (it may have been blocked by safety filters). Try rephrasing."
     except Exception as e:
-        return f"⚠️ שגיאה בקריאה ל-AI: {e}"
+        return f"⚠️ Error calling the AI: {e}"

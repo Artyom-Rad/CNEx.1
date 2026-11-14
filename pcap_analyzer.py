@@ -1,6 +1,6 @@
-"""pcap_analyzer.py - חילוץ נתונים וטרנזקציות HTTP מקובצי PCAP / PCAPNG (FR-1..FR-7).
+"""pcap_analyzer.py - Extracts data and HTTP transactions from PCAP / PCAPNG files (FR-1..FR-7).
 
-הערה: ניתוח HTTP מבוסס על הרכבת מקטעי TCP פשוטה (ללא פענוח chunked/gzip ללא HTTPS).
+Note: HTTP analysis relies on simple TCP segment reassembly (no chunked/gzip decoding, no HTTPS decryption).
 """
 from __future__ import annotations
 
@@ -13,14 +13,14 @@ from scapy.all import ARP, DNS, ICMP, IP, TCP, UDP, Ether, IPv6, PcapReader, Raw
 
 HTTP_METHODS = (b"GET ", b"POST ", b"PUT ", b"DELETE ", b"HEAD ",
                 b"OPTIONS ", b"PATCH ", b"CONNECT ", b"TRACE ")
-BODY_LIMIT = 4000  # מספר בתים מקסימלי של Body שנשמר לכל הודעה
+BODY_LIMIT = 4000  # max number of body bytes stored per message
 
 
 @dataclass
 class PcapResult:
     packets: pd.DataFrame
     transactions: pd.DataFrame
-    tx_details: dict          # tx_id -> dict עם הכותרות והתוכן המלא
+    tx_details: dict          # tx_id -> dict with headers and full content
     summary: dict
     warnings: list = field(default_factory=list)
 
@@ -33,7 +33,7 @@ class _HttpState:
         self.pending = {}       # conn_key -> deque[tx]
         self.txs = []
         self.unmatched_responses = 0
-        self.seen = set()       # (dir_key, seq) - סינון שידורים חוזרים
+        self.seen = set()       # (dir_key, seq) - filters out retransmissions
 
     def feed(self, frame, ts, src, sport, dst, dport, seq, payload) -> bool:
         dk = (src, sport, dst, dport)
@@ -51,7 +51,7 @@ class _HttpState:
         elif buf:
             buf["data"] += payload
         else:
-            last = self.last_msg.get(dk)       # המשך Body של הודעה קודמת
+            last = self.last_msg.get(dk)       # continuation of a previous message body
             if last:
                 tx, fld = last
                 room = BODY_LIMIT - len(tx[fld])
@@ -169,14 +169,14 @@ def analyze_pcap(path: str) -> PcapResult:
             for idx, pkt in enumerate(reader, start=1):
                 try:
                     rows.append(_process_packet(idx, pkt, http))
-                except Exception as e:  # חבילה בודדת פגומה - ממשיכים
-                    warnings.append(f"חבילה {idx} דולגה: {e}")
-    except Exception as e:  # קובץ פגום / קטוע - משתמשים במה שנקרא
-        warnings.append(f"שגיאה בקריאת הקובץ (ייתכן שהוא פגום/קטוע): {e}")
+                except Exception as e:  # a single corrupt packet - keep going
+                    warnings.append(f"Packet {idx} skipped: {e}")
+    except Exception as e:  # corrupt / truncated file - use what was read
+        warnings.append(f"Error reading the file (it may be corrupt or truncated): {e}")
     http.flush()
 
     if not rows:
-        raise ValueError("לא נקראו חבילות מהקובץ. ודא שהוא קובץ PCAP/PCAPNG תקין.")
+        raise ValueError("No packets could be read from the file. Make sure it is a valid PCAP/PCAPNG file.")
 
     pk = pd.DataFrame(rows)
     start, end = pk["time"].min(), pk["time"].max()
@@ -194,7 +194,7 @@ def analyze_pcap(path: str) -> PcapResult:
     )
 
     if http.unmatched_responses:
-        warnings.append(f"{http.unmatched_responses} תגובות HTTP ללא בקשה תואמת בהקלטה.")
+        warnings.append(f"{http.unmatched_responses} HTTP responses had no matching request in the capture.")
 
     tx_rows, details = [], {}
     for t in http.txs:
