@@ -26,6 +26,11 @@ def load(data: bytes, suffix: str, digest: str):
 
 
 # ------------------------------------------------------------- FR-1: input
+api_key = st.sidebar.text_input("Gemini API Key", type="password",
+                                help="Get a free key at https://aistudio.google.com/apikey")
+if api_key:
+    os.environ["GEMINI_API_KEY"] = api_key
+    
 up = st.sidebar.file_uploader("Upload a capture file", type=["pcap", "pcapng"])
 if not up:
     st.info("Upload a .pcap or .pcapng file in the sidebar to get started.")
@@ -127,9 +132,34 @@ with tab3:
                           value=True, disabled=selected_id is None)
     if "history" not in st.session_state:
         st.session_state.history = []
-    question = st.text_input("Ask a question about the traffic",
+
+    # Clickable example questions: clicking one fills the box and sends it immediately.
+    st.markdown("**Example questions**")
+    examples = [
+        "Give me a short summary of this capture.",
+        "What is the slowest request?",
+        "How many requests were sent to each host?",
+        "Which requests have no response?",
+        "Which requests returned an error status (4xx or 5xx)?",
+        "What are the most common HTTP methods and status codes?",
+    ]
+    if selected_id is not None and use_sel:
+        examples.append("Explain the selected transaction.")
+
+    def _use_example(text: str):
+        st.session_state["question"] = text
+        st.session_state["auto_send"] = True
+
+    ex_cols = st.columns(2)
+    for i, ex in enumerate(examples):
+        ex_cols[i % 2].button(ex, key=f"example_{i}", on_click=_use_example,
+                              args=(ex,), use_container_width=True)
+
+    question = st.text_input("Ask a question about the traffic", key="question",
                              placeholder="What is the slowest request? How many requests were sent to example.com?")
-    if st.button("Send", type="primary") and question.strip():
+    send_clicked = st.button("Send", type="primary")
+    auto_send = st.session_state.pop("auto_send", False)
+    if (send_clicked or auto_send) and question.strip():
         sel = res.tx_details.get(selected_id) if (use_sel and selected_id) else None
         ctx = build_context(S, tx, sel, selected_id)
         with st.spinner("Thinking..."):

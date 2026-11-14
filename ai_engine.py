@@ -9,6 +9,10 @@ from __future__ import annotations
 import json
 import os
 import pandas as pd
+import time
+
+FALLBACK_MODEL = "gemini-2.5-flash-lite"
+
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -68,7 +72,44 @@ def build_context(summary: dict, tx: pd.DataFrame, selected: dict | None = None,
     return "\n\n".join(parts)
 
 
+def _is_transient(e: Exception) -> bool:
+    code = getattr(e, "code", None)
+    text = str(e)
+    return code in (429, 500, 503) or any(
+        s in text for s in ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED"))
+
+
 def ask_ai(question: str, context: str) -> str:
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    if not api_key:
+        return "⚠️ The GEMINI_API_KEY environment variable is not set. See the README for instructions."
+    try:
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(api_key=api_key)
+        config = types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT, temperature=0, max_output_tokens=4096)
+        contents = f"{context}\n\n## QUESTION\n{question}"
+
+        last_error = None
+        for model in dict.fromkeys([MODEL, FALLBACK_MODEL]):   # main model first, then fallback
+            for attempt in range(3):
+                try:
+                    resp = client.models.generate_content(
+                        model=model, contents=contents, config=config)
+                    if resp.text:
+                        return resp.text
+                    return "⚠️ The AI returned no answer (it may have been blocked by safety filters). Try rephrasing."
+                except Exception as e:
+                    if not _is_transient(e):
+                        raise
+                    last_error = e
+                    time.sleep(2 ** attempt)                   # wait 1s, 2s, 4s
+        return ("⚠️ The AI service is busy right now. Please try again in a minute. "
+                f"({last_error})")
+    except Exception as e:
+        return f"⚠️ Error calling the AI: {e}"
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if not api_key:
         return "⚠️ The GEMINI_API_KEY environment variable is not set. See the README for instructions."
